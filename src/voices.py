@@ -21,7 +21,7 @@ from pathlib import Path
 import httpx
 
 from src.contract import VoiceEntry
-from src.errors import CatalogUnavailable, DownloadFailed, VoiceAlreadyInstalled, VoiceNotInCatalog
+from src.errors import CatalogUnavailable, DeleteFailed, DownloadFailed, VoiceAlreadyInstalled, VoiceNotInCatalog, VoiceUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +154,22 @@ class VoiceLibrary:
                 await asyncio.to_thread(shutil.rmtree, stage, True)
         logger.info("installed voice %s", voice.key)
         return self._entry(voice, True)
+
+    async def remove(self, name: str) -> None:
+        async with self._install_lock:
+            if not _NAME.match(name or "") or name not in await asyncio.to_thread(self._installed):
+                raise VoiceUnavailable(f"Voice '{name}' is not installed. Call tool_bard_listVoices for the list.")
+            try:
+                await asyncio.to_thread(self._unlink, name)
+            except OSError as error:
+                logger.warning("voice delete failed: %s", type(error).__name__)
+                raise DeleteFailed("The voice files could not be deleted; it may be in use. Try again later.") from error
+        logger.info("deleted voice %s", name)
+
+    def _unlink(self, key: str) -> None:
+        # The .onnx first: Bard lists a voice by its .onnx, so a half-deleted voice is never listed.
+        (self._voices_dir / f"{key}.onnx").unlink()
+        (self._voices_dir / f"{key}.onnx.json").unlink(missing_ok=True)
 
     def _check_disk(self, size: int) -> None:
         self._voices_dir.mkdir(parents=True, exist_ok=True)

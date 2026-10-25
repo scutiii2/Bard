@@ -19,3 +19,4 @@ This file is the one instruction file for every coding agent; `CLAUDE.md` only i
 - Result models end with `message`. Error messages never contain paths.
 - The owner key is the username from `_meta.requester`.
 - Admin-only tools (`tool_bard_listDownloadable`, `tool_bard_downloadVoice`) go through `AdminGate`, which asks ember_api for `bard.admin` and fails closed. Voice names must come from the catalog; installs are staged and checked before they reach `.data/voices/`.
+- `tool_bard_deleteVoice` needs its own permission, `bard.delete`, which `bard.admin` does not imply. It uses a second `AdminGate(permission="bard.delete")` with no static admins (`BARD_ADMINS` never grants delete). The default voice cannot be deleted.

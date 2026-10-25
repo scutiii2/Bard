@@ -16,7 +16,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 
 from src.admin_gate import AdminGate
 from src.config import Settings
-from src.contract import DownloadableVoices, DownloadResult, SpeakResult, VoiceList
+from src.contract import DeleteResult, DownloadableVoices, DownloadResult, SpeakResult, VoiceList
 from src.engine import PiperEngine, TtsEngine
 from src.errors import BardError
 from src.identity import owner_from_context
@@ -28,7 +28,8 @@ from src.voices import VoiceLibrary
 INSTRUCTIONS = (
     "Text to speech. Call tool_bard_speak with the text to say; the chat shows a player and a download link. "
     "Pass only text a user should hear. Call tool_bard_listVoices to see the installed voices. "
-    "tool_bard_listDownloadable and tool_bard_downloadVoice add new voices and are for Bard admins only."
+    "tool_bard_listDownloadable and tool_bard_downloadVoice add new voices and are for Bard admins only. "
+    "tool_bard_deleteVoice removes one and needs the separate bard.delete permission."
 )
 
 
@@ -37,6 +38,7 @@ def build_app(
     engine: TtsEngine | None = None,
     gate: AdminCheck | None = None,
     library: VoiceSource | None = None,
+    delete_gate: AdminCheck | None = None,
 ) -> Starlette:
     engine = engine or PiperEngine(settings.voices_dir, settings.ffmpeg)
     store = AudioStore(settings.audio_dir, settings.ttl_seconds, settings.quota_bytes)
@@ -44,7 +46,11 @@ def build_app(
     # shortcut: these HTTP clients live as long as the process and are not closed on shutdown.
     gate = gate or AdminGate(httpx.AsyncClient(), settings.ember_api_url, settings.internal_token, settings.admins)
     library = library or VoiceLibrary(httpx.AsyncClient(follow_redirects=True), settings.voices_dir, settings.staging_dir)
-    service = BardService(engine, store, settings, library, gate)
+    # No static admins here: BARD_ADMINS grants installing, never deleting.
+    delete_gate = delete_gate or AdminGate(
+        httpx.AsyncClient(), settings.ember_api_url, settings.internal_token, permission="bard.delete"
+    )
+    service = BardService(engine, store, settings, library, gate, delete_gate)
     mcp = FastMCP(name="bard", instructions=INSTRUCTIONS, host=settings.host, port=settings.port)
 
     @mcp.tool(meta={"keywords": ["speak", "say", "read aloud", "tts", "voice", "audio"], "display_label": "Generating speech"})
@@ -96,6 +102,21 @@ def build_app(
         tool_bard_speak. Refuses a voice that is already installed. Ask the user before downloading."""
         try:
             return await service.download_voice(owner_from_context(ctx), voice)
+        except BardError as error:
+            raise ToolError(str(error)) from error
+
+    @mcp.tool(
+        meta={"keywords": ["voices", "delete", "remove", "uninstall", "tts"], "display_label": "Deleting a voice"},
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False),
+    )
+    async def tool_bard_deleteVoice(
+        voice: Annotated[str, Field(description="An installed voice name from tool_bard_listVoices.")],
+        ctx: Context = None,
+    ) -> DeleteResult:
+        """Needs the bard.delete permission. Delete one installed voice from the Bard machine. The default voice
+        cannot be deleted. Ask the user to confirm before deleting."""
+        try:
+            return await service.delete_voice(owner_from_context(ctx), voice)
         except BardError as error:
             raise ToolError(str(error)) from error
 

@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from src.config import Settings
-from src.errors import AdminRequired, IdentityRequired, TextRejected, VoiceNotInCatalog, VoiceUnavailable
+from src.errors import AdminRequired, DeleteFailed, IdentityRequired, TextRejected, VoiceNotInCatalog, VoiceUnavailable
 from src.service import BardService
 from src.store import AudioStore
 from tests.fakes import FakeEngine, FakeGate, FakeLibrary
@@ -25,9 +25,14 @@ def library():
 
 
 @pytest.fixture
-def service(engine, gate, library, tmp_path):
+def delete_gate():
+    return FakeGate()
+
+
+@pytest.fixture
+def service(engine, gate, library, delete_gate, tmp_path):
     settings = Settings(data_dir=tmp_path, voice="v1", max_chars=50)
-    return BardService(engine, AudioStore(tmp_path / "audio", 60, 10_000), settings, library, gate)
+    return BardService(engine, AudioStore(tmp_path / "audio", 60, 10_000), settings, library, gate, delete_gate)
 
 
 async def test_speak_synthesizes_stores_and_describes(service, engine):
@@ -105,6 +110,30 @@ async def test_downloading_a_voice_is_for_admins_only(service, gate, library):
     assert library.installed == ["en_US-ryan-high"]
     assert result.voice == "en_US-ryan-high" and result.size_mb == 114.2
     assert "tool_bard_speak" in result.message
+
+
+async def test_deleting_a_voice_needs_the_delete_permission_not_just_admin(service, gate, delete_gate, library, engine):
+    gate.admins.add("ann")  # bard.admin alone is not enough
+    with pytest.raises(AdminRequired, match="bard.delete"):
+        await service.delete_voice("ann", "v2")
+    assert library.removed == [] and engine.unloaded == []
+    delete_gate.admins.add("ann")
+    result = await service.delete_voice("ann", "v2")
+    assert library.removed == ["v2"] and engine.unloaded == ["v2"]
+    assert result.voice == "v2" and "Deleted v2" in result.message
+
+
+async def test_the_default_voice_cannot_be_deleted(service, delete_gate, library):
+    delete_gate.admins.add("ann")
+    with pytest.raises(DeleteFailed, match="default voice"):
+        await service.delete_voice("ann", "v1")
+    assert library.removed == []
+
+
+async def test_delete_needs_an_identity_before_the_gate_is_asked(service, delete_gate):
+    with pytest.raises(IdentityRequired):
+        await service.delete_voice("", "v2")
+    assert delete_gate.asked == []
 
 
 async def test_admin_tools_need_an_identity_before_the_gate_is_asked(service, gate):

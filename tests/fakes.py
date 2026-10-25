@@ -11,9 +11,13 @@ class FakeEngine:
     def __init__(self, voices: tuple[str, ...] = ("v1", "v2")) -> None:
         self._voices = list(voices)
         self.calls: list[tuple[str, str]] = []
+        self.unloaded: list[str] = []
 
     def voices(self) -> list[str]:
         return list(self._voices)
+
+    def unload(self, name: str) -> None:
+        self.unloaded.append(name)
 
     async def synthesize(self, text: str, voice: str) -> Synthesis:
         self.calls.append((text, voice))
@@ -43,6 +47,10 @@ class FakeLibrary:
         ]
         self.listed: list[tuple[str | None, str | None]] = []
         self.installed: list[str] = []
+        self.removed: list[str] = []
+
+    async def remove(self, name: str) -> None:
+        self.removed.append(name)
 
     async def list(self, language: str | None, quality: str | None) -> list[VoiceEntry]:
         self.listed.append((language, quality))

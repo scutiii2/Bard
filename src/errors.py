@@ -43,3 +43,7 @@ class VoiceAlreadyInstalled(BardError):
 
 class DownloadFailed(BardError):
     code = "download_failed"
+
+
+class DeleteFailed(BardError):
+    code = "delete_failed"

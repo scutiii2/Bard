@@ -11,7 +11,7 @@ class Clock:
         return self.now
 
 
-def make_gate(handler, *, token="tok", static=frozenset(), clock=None):
+def make_gate(handler, *, token="tok", static=frozenset(), clock=None, permission=None):
     requests: list[httpx.Request] = []
 
     def recording(request: httpx.Request) -> httpx.Response:
@@ -19,7 +19,7 @@ def make_gate(handler, *, token="tok", static=frozenset(), clock=None):
         return handler(request)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(recording))
-    gate = AdminGate(client, "http://ember.test", token, static, ttl_seconds=30, clock=clock or Clock())
+    gate = AdminGate(client, "http://ember.test", token, static, ttl_seconds=30, clock=clock or Clock(), permission=permission)
     return gate, requests
 
 
@@ -87,6 +87,12 @@ async def test_failures_are_not_cached():
     assert await gate.is_admin("ann") is False
     assert await gate.is_admin("ann") is True
     assert len(requests) == 2
+
+
+async def test_a_permission_gate_names_the_permission_it_asks_about():
+    gate, requests = make_gate(admin, permission="bard.delete")
+    assert await gate.is_admin("ann") is True
+    assert requests[0].read() == b'{"username":"ann","permission":"bard.delete"}'
 
 
 async def test_an_empty_username_is_denied_without_a_request():

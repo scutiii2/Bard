@@ -37,3 +37,8 @@ class DownloadResult(BaseModel):
     voice: str
     size_mb: float
     message: str
+
+
+class DeleteResult(BaseModel):
+    voice: str
+    message: str

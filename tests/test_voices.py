@@ -5,7 +5,7 @@ import types
 import httpx
 import pytest
 
-from src.errors import CatalogUnavailable, DownloadFailed, VoiceAlreadyInstalled, VoiceNotInCatalog
+from src.errors import CatalogUnavailable, DeleteFailed, DownloadFailed, VoiceAlreadyInstalled, VoiceNotInCatalog, VoiceUnavailable
 from src.voices import VoiceLibrary
 
 MODEL = b"model-bytes" * 100
@@ -129,6 +129,32 @@ async def test_an_unreachable_catalog_is_catalog_unavailable(tmp_path):
     library = VoiceLibrary(client, tmp_path / "v", tmp_path / "s", catalog_url="https://hf.test/voices.json", base_url="https://hf.test/files/")
     with pytest.raises(CatalogUnavailable):
         await library.list(None, None)
+
+
+async def test_remove_deletes_both_files(library, tmp_path):
+    await library.install("en_GB-alba-medium")
+    await library.remove("en_GB-alba-medium")
+    assert list((tmp_path / "voices").iterdir()) == []
+
+
+async def test_remove_refuses_a_voice_that_is_not_installed_or_a_path(library, tmp_path):
+    (tmp_path / "keep.txt").write_bytes(b"x")
+    for name in ("en_US-ryan-high", "../keep", ""):
+        with pytest.raises(VoiceUnavailable):
+            await library.remove(name)
+    assert (tmp_path / "keep.txt").exists()
+
+
+async def test_remove_reports_a_locked_file_without_a_path(library, monkeypatch):
+    await library.install("en_GB-alba-medium")
+
+    def locked(self, *args, **kwargs):
+        raise PermissionError("C:/secret/path")
+
+    monkeypatch.setattr("pathlib.Path.unlink", locked)
+    with pytest.raises(DeleteFailed) as error:
+        await library.remove("en_GB-alba-medium")
+    assert "secret" not in str(error.value)
 
 
 async def test_install_writes_both_files_and_cleans_the_staging_area(library, tmp_path):

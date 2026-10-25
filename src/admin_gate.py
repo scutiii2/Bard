@@ -23,8 +23,10 @@ class AdminGate:
         static_admins: frozenset[str] = frozenset(),
         ttl_seconds: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
+        permission: str | None = None,
     ) -> None:
         self._client = client
+        self._permission = permission  # None asks about bard.admin, the endpoint's default
         self._url = f"{base_url.rstrip('/')}/api/bard/internal/admin-check"
         self._token = token
         self._static = static_admins
@@ -50,9 +52,10 @@ class AdminGate:
     async def _ask(self, username: str) -> bool | None:
         if not self._token:
             return None  # ember_api only answers a caller that proves the shared token
+        payload = {"username": username} | ({"permission": self._permission} if self._permission else {})
         try:
             response = await self._client.post(
-                self._url, json={"username": username}, headers={"X-Internal-Token": self._token}, timeout=5
+                self._url, json=payload, headers={"X-Internal-Token": self._token}, timeout=5
             )
             body = response.json() if response.status_code == 200 else None
         except (httpx.HTTPError, ValueError) as error:

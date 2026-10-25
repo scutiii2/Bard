@@ -6,9 +6,9 @@ import asyncio
 from typing import Protocol
 
 from src.config import Settings
-from src.contract import DownloadableVoices, DownloadResult, SpeakResult, VoiceEntry, VoiceList
+from src.contract import DeleteResult, DownloadableVoices, DownloadResult, SpeakResult, VoiceEntry, VoiceList
 from src.engine import TtsEngine
-from src.errors import AdminRequired, IdentityRequired, VoiceUnavailable
+from src.errors import AdminRequired, DeleteFailed, IdentityRequired, VoiceUnavailable
 from src.store import AudioStore
 from src.text_prep import prepare
 
@@ -20,6 +20,8 @@ class VoiceSource(Protocol):
 
     async def install(self, name: str) -> VoiceEntry: ...
 
+    async def remove(self, name: str) -> None: ...
+
 
 class AdminCheck(Protocol):
     async def is_admin(self, username: str) -> bool: ...
@@ -27,13 +29,20 @@ class AdminCheck(Protocol):
 
 class BardService:
     def __init__(
-        self, engine: TtsEngine, store: AudioStore, settings: Settings, library: VoiceSource, gate: AdminCheck
+        self,
+        engine: TtsEngine,
+        store: AudioStore,
+        settings: Settings,
+        library: VoiceSource,
+        gate: AdminCheck,
+        delete_gate: AdminCheck,
     ) -> None:
         self._engine = engine
         self._store = store
         self._settings = settings
         self._library = library
         self._gate = gate
+        self._delete_gate = delete_gate  # asks for bard.delete, which bard.admin does not imply
         self._slots = asyncio.Semaphore(settings.max_concurrent)
         # shortcut: a lock may be dropped while a waiter still holds it, so two identical
         # requests can then both synthesize; harmless (same file id), upgrade if it ever hurts.
@@ -70,6 +79,18 @@ class BardService:
             size_mb=voice.size_mb,
             message=f'Installed {voice.voice} ({voice.size_mb} MB). Pass voice="{voice.voice}" to tool_bard_speak to use it.',
         )
+
+    async def delete_voice(self, owner: str, name: str) -> DeleteResult:
+        if not owner:
+            raise IdentityRequired(_NO_IDENTITY)
+        if not await self._delete_gate.is_admin(owner):
+            raise AdminRequired("Only users with the bard.delete permission can delete voices. Ask an administrator for it.")
+        if name == self._settings.voice:
+            raise DeleteFailed(f"{name} is the default voice and cannot be deleted. Change BARD_VOICE first.")
+        # Unload first: a loaded model can keep its file open, which blocks the delete on Windows.
+        await asyncio.to_thread(self._engine.unload, name)
+        await self._library.remove(name)
+        return DeleteResult(voice=name, message=f"Deleted {name}. It can be downloaded again with tool_bard_downloadVoice.")
 
     async def speak(self, owner: str, text: str, voice: str | None = None) -> SpeakResult:
         if not owner:

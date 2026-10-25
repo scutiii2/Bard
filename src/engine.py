@@ -23,6 +23,8 @@ class Synthesis:
 class TtsEngine(Protocol):
     def voices(self) -> list[str]: ...
 
+    def unload(self, name: str) -> None: ...
+
     async def synthesize(self, text: str, voice: str) -> Synthesis: ...
 
 
@@ -35,6 +37,11 @@ class PiperEngine:
 
     def voices(self) -> list[str]:
         return sorted(p.name.removesuffix(".onnx") for p in self._dir.glob("*.onnx")) if self._dir.is_dir() else []
+
+    def unload(self, name: str) -> None:
+        """Drop a loaded voice so its files can be deleted."""
+        with self._load_lock:
+            self._loaded.pop(name, None)
 
     def _voice(self, name: str):
         with self._load_lock:
