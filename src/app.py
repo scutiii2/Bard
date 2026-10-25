@@ -9,7 +9,7 @@ import httpx
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
@@ -18,7 +18,7 @@ from src.admin_gate import AdminGate
 from src.config import Settings
 from src.contract import DeleteResult, DownloadableVoices, DownloadResult, SpeakResult, VoiceList
 from src.engine import PiperEngine, TtsEngine
-from src.errors import BardError
+from src.errors import BardError, EngineFailed, IdentityRequired, QuotaExceeded
 from src.identity import owner_from_context
 from src.middleware import InternalTokenMiddleware
 from src.service import AdminCheck, BardService, VoiceSource
@@ -31,6 +31,13 @@ INSTRUCTIONS = (
     "tool_bard_listDownloadable and tool_bard_downloadVoice add new voices and are for Bard admins only. "
     "tool_bard_deleteVoice removes one and needs the separate bard.delete permission."
 )
+
+
+class SpeakIn(BaseModel):
+    """Strict HTTP input; the service cleans and bounds spoken text."""
+    model_config = ConfigDict(strict=True, extra="forbid")
+    text: str
+    voice: str | None = None
 
 
 def build_app(
@@ -142,6 +149,31 @@ def build_app(
                 "Content-Disposition": f'inline; filename="bard-{file_id[:8]}.mp3"',
             },
         )
+
+    @mcp.custom_route("/api/speak", methods=["POST"])
+    async def speak(request: Request) -> Response:
+        """Generate owned audio using the existing text preparation and cache."""
+        owner = request.headers.get("x-requester-username", "").strip()
+        if not owner:
+            return JSONResponse({"error": "identity_required"}, status_code=401)
+        try:
+            body = SpeakIn.model_validate(await request.json())
+        except (ValueError, ValidationError):
+            return JSONResponse({"error": "invalid_request", "message": "Send text and an optional installed voice."}, status_code=400)
+        try:
+            result = await service.speak(owner, body.text, body.voice)
+        except BardError as error:
+            code = 401 if isinstance(error, IdentityRequired) else 413 if isinstance(error, QuotaExceeded) else 503 if isinstance(error, EngineFailed) else 400
+            return JSONResponse({"error": error.code, "message": str(error)}, status_code=code)
+        return JSONResponse({"file_id": result.file_id, "duration_s": result.duration_s, "voice": result.voice})
+
+    @mcp.custom_route("/api/voices", methods=["GET"])
+    async def voices(request: Request) -> Response:
+        """Only installed voices; clients choose a voice explicitly on each run."""
+        if not request.headers.get("x-requester-username", "").strip():
+            return JSONResponse({"error": "identity_required"}, status_code=401)
+        result = await service.list_voices()
+        return JSONResponse({"voices": result.voices})
 
     app = mcp.streamable_http_app()
     app.add_middleware(InternalTokenMiddleware, token=settings.internal_token)
