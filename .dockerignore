@@ -1,0 +1,9 @@
+.git
+.data
+.env
+.venv_bard
+__pycache__
+.pytest_cache
+tests
+tools
+zip_versions
