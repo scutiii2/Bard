@@ -9,16 +9,16 @@ import httpx
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from src.admin_gate import AdminGate
 from src.config import Settings
-from src.contract import DownloadableVoices, DownloadResult, SpeakResult, VoiceList
+from src.contract import DeleteResult, DownloadableVoices, DownloadResult, SpeakResult, VoiceList
 from src.engine import PiperEngine, TtsEngine
-from src.errors import BardError
+from src.errors import BardError, EngineFailed, IdentityRequired, QuotaExceeded
 from src.identity import owner_from_context
 from src.middleware import InternalTokenMiddleware
 from src.service import AdminCheck, BardService, VoiceSource
@@ -28,8 +28,16 @@ from src.voices import VoiceLibrary
 INSTRUCTIONS = (
     "Text to speech. Call tool_bard_speak with the text to say; the chat shows a player and a download link. "
     "Pass only text a user should hear. Call tool_bard_listVoices to see the installed voices. "
-    "tool_bard_listDownloadable and tool_bard_downloadVoice add new voices and are for Bard admins only."
+    "tool_bard_listDownloadable and tool_bard_downloadVoice add new voices and are for Bard admins only. "
+    "tool_bard_deleteVoice removes one and needs the separate bard.delete permission."
 )
+
+
+class SpeakIn(BaseModel):
+    """Strict HTTP input; the service cleans and bounds spoken text."""
+    model_config = ConfigDict(strict=True, extra="forbid")
+    text: str
+    voice: str | None = None
 
 
 def build_app(
@@ -37,6 +45,7 @@ def build_app(
     engine: TtsEngine | None = None,
     gate: AdminCheck | None = None,
     library: VoiceSource | None = None,
+    delete_gate: AdminCheck | None = None,
 ) -> Starlette:
     engine = engine or PiperEngine(settings.voices_dir, settings.ffmpeg)
     store = AudioStore(settings.audio_dir, settings.ttl_seconds, settings.quota_bytes)
@@ -44,7 +53,11 @@ def build_app(
     # shortcut: these HTTP clients live as long as the process and are not closed on shutdown.
     gate = gate or AdminGate(httpx.AsyncClient(), settings.ember_api_url, settings.internal_token, settings.admins)
     library = library or VoiceLibrary(httpx.AsyncClient(follow_redirects=True), settings.voices_dir, settings.staging_dir)
-    service = BardService(engine, store, settings, library, gate)
+    # No static admins here: BARD_ADMINS grants installing, never deleting.
+    delete_gate = delete_gate or AdminGate(
+        httpx.AsyncClient(), settings.ember_api_url, settings.internal_token, permission="bard.delete"
+    )
+    service = BardService(engine, store, settings, library, gate, delete_gate)
     mcp = FastMCP(name="bard", instructions=INSTRUCTIONS, host=settings.host, port=settings.port)
 
     @mcp.tool(meta={"keywords": ["speak", "say", "read aloud", "tts", "voice", "audio"], "display_label": "Generating speech"})
@@ -99,6 +112,21 @@ def build_app(
         except BardError as error:
             raise ToolError(str(error)) from error
 
+    @mcp.tool(
+        meta={"keywords": ["voices", "delete", "remove", "uninstall", "tts"], "display_label": "Deleting a voice"},
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False),
+    )
+    async def tool_bard_deleteVoice(
+        voice: Annotated[str, Field(description="An installed voice name from tool_bard_listVoices.")],
+        ctx: Context = None,
+    ) -> DeleteResult:
+        """Needs the bard.delete permission. Delete one installed voice from the Bard machine. The default voice
+        cannot be deleted. Ask the user to confirm before deleting."""
+        try:
+            return await service.delete_voice(owner_from_context(ctx), voice)
+        except BardError as error:
+            raise ToolError(str(error)) from error
+
     @mcp.custom_route("/health", methods=["GET"])
     async def health(request: Request) -> Response:
         return JSONResponse({"ok": True})
@@ -121,6 +149,31 @@ def build_app(
                 "Content-Disposition": f'inline; filename="bard-{file_id[:8]}.mp3"',
             },
         )
+
+    @mcp.custom_route("/api/speak", methods=["POST"])
+    async def speak(request: Request) -> Response:
+        """Generate owned audio using the existing text preparation and cache."""
+        owner = request.headers.get("x-requester-username", "").strip()
+        if not owner:
+            return JSONResponse({"error": "identity_required"}, status_code=401)
+        try:
+            body = SpeakIn.model_validate(await request.json())
+        except (ValueError, ValidationError):
+            return JSONResponse({"error": "invalid_request", "message": "Send text and an optional installed voice."}, status_code=400)
+        try:
+            result = await service.speak(owner, body.text, body.voice)
+        except BardError as error:
+            code = 401 if isinstance(error, IdentityRequired) else 413 if isinstance(error, QuotaExceeded) else 503 if isinstance(error, EngineFailed) else 400
+            return JSONResponse({"error": error.code, "message": str(error)}, status_code=code)
+        return JSONResponse({"file_id": result.file_id, "duration_s": result.duration_s, "voice": result.voice})
+
+    @mcp.custom_route("/api/voices", methods=["GET"])
+    async def voices(request: Request) -> Response:
+        """Only installed voices; clients choose a voice explicitly on each run."""
+        if not request.headers.get("x-requester-username", "").strip():
+            return JSONResponse({"error": "identity_required"}, status_code=401)
+        result = await service.list_voices()
+        return JSONResponse({"voices": result.voices})
 
     app = mcp.streamable_http_app()
     app.add_middleware(InternalTokenMiddleware, token=settings.internal_token)

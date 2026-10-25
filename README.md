@@ -10,10 +10,13 @@ Text to speech for Ember. Piper synthesizes an English voice on the CPU, ffmpeg 
 | `tool_bard_listVoices` | List installed voices and the default. Read-only. Open to every user. |
 | `tool_bard_listDownloadable` | Admins only. List the Piper catalog voices (language, quality, size, installed), optionally filtered by `language` and `quality`. Read-only. |
 | `tool_bard_downloadVoice` | Admins only. Download one catalog voice onto the Bard host. Refuses an installed voice. |
+| `tool_bard_deleteVoice` | Needs `bard.delete` (separate from `bard.admin`). Delete one installed voice from the Bard host. Refuses the default voice. |
 
 ## Admins
 
 Admin means the account holds the `bard.admin` permission in ember_api (the Administrator role has it; grant it to other roles on the roles page). Bard asks ember_api through `POST /api/bard/internal/admin-check` with the shared `INTERNAL_API_TOKEN`, and caches each answer for 30 seconds, so a grant or revoke applies within about half a minute. Any failure, such as ember_api being down, counts as "not an admin". `BARD_ADMINS` lists usernames that are admins even then (a break-glass list; leave it empty normally).
+
+Deleting a voice needs the separate `bard.delete` permission, granted the same way (the Administrator role has it). `bard.admin` does not imply it, and `BARD_ADMINS` does not grant it, so with ember_api down nobody can delete. The default voice (`BARD_VOICE`) is never deleted; the voice's files go, cached audio stays until it expires.
 
 Downloads come from the Piper voice catalog on Hugging Face: a name must be in the catalog, files are staged, checked against the catalog's size and MD5 and then moved into `.data/voices/`. One voice, `pt_PT-tugão-medium`, has a non-ASCII name and cannot be installed this way; use `python -m piper.download_voices` for it.
 
@@ -45,3 +48,9 @@ Downloads come from the Piper voice catalog on Hugging Face: a name must be in t
 
 - Audio is private to the asking user (their username from Armory's `forward_requester`) and expires after the time-to-live.
 - Check the voice's licence before redistributing it; voices are downloaded, not committed.
+
+## HTTP speech for Ember
+
+`POST /api/speak` accepts JSON `{text, voice?}` and returns `{file_id, duration_s, voice}` through `BardService.speak`. Markdown cleanup, the 5,000 cleaned-character cap, owner cache, quota and synthesis semaphore all apply. `GET /api/voices` returns `{voices: string[]}` containing installed voices only. Both require `X-Requester-Username` and the configured internal token, just like `/api/files/{file_id}`. Invalid text/voice is 400, quota is 413 and synthesis failure is 503.
+
+Ember proxies these routes with `tools.execute` and `files.download`. Its Read aloud action asks for a voice on every run, strips Markdown, batches at 3,500 characters and synthesizes one batch ahead during playback. Stop aborts pending browser requests and playback; already completed audio retains the existing owner and TTL rules. Agent-triggered audio cards and all MCP tools keep their existing behavior.
