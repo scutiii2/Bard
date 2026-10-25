@@ -1,0 +1,34 @@
+# Bard text-to-speech MCP server.
+# Start:  docker compose up -d --build        (armory reaches it at http://bard:8090/mcp)
+# Needs a .env next to this file with INTERNAL_API_TOKEN (same value as Citadel's); see .env.example.
+
+name: bard
+
+services:
+  bard:
+    build: .
+    restart: unless-stopped
+    environment:
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?set INTERNAL_API_TOKEN in .env}
+      BARD_VOICE: ${BARD_VOICE:-en_US-lessac-medium}
+      EMBER_API_URL: http://ember_api:8030
+    ports:
+      - "127.0.0.1:${BARD_PORT:-8090}:8090"
+    volumes:
+      - bard_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
+      interval: 15s
+      timeout: 5s
+      start_period: 120s
+    networks: [citadel]
+
+volumes:
+  bard_data:
+
+networks:
+  # Join the Citadel stack's network so armory/ember_api can reach http://bard:8090. Start the Citadel stack first:
+  # it creates this network.
+  citadel:
+    name: citadel_core
+    external: true
